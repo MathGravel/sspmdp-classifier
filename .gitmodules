@@ -1,0 +1,6 @@
+[submodule "mdptk"]
+	path = mdptk
+	url = https://gitlab.info.uqam.ca/champagne_gareau.jael/mdptk.git
+[submodule "graph-toolkit"]
+	path = graph-toolkit
+	url = https://gitlab.info.uqam.ca/champagne_gareau.jael/graph-toolkit.git
