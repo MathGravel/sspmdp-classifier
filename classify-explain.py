@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 import os
 import argparse
-import json
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
-import dice_ml
-from dice_ml.utils import helpers
 
 PRINT_CHOICES = ['summary', 'cf', 'importance', 'df', 'debug']
 CATEGORY_LIST = [
@@ -36,125 +33,205 @@ def safe_float(val):
 
 
 def load_data(folder_path):
-    labels = []
+    # Define column structure - maintains order
+    solver_columns = ['Name', 'VI', 'LRTDP', 'ILAOstar', 'TVI']
+    feature_columns = ['Model', 'Nodes', 'Goals', 'SCC', 'Largest SCC',
+                       'Clustering', 'Goals excentricity',
+                       'avgNumActions', 'avgNumEffects']
+    # Include both Name and Model in final columns
+    all_columns = ['Name', 'Model'] + solver_columns[1:] + feature_columns[1:]
+
     data = {}
-    with open(os.path.join(folder_path, 'trainingData.csv')) as file:
-        labels = file.readline().strip().split(',')
-        labels.append(TARGET_LABEL)
-    csv_groups = [
-        ['barabasi.csv', 'kronecker.csv', 'erdosNM.csv', 'smallworld.csv'],
-        ['sap.csv', 'layered.csv', 'wetfloor.csv']
+
+    # Load runtime CSVs first
+    runtime_files = ['barabasi.csv', 'kronecker.csv', 'erdosNM.csv', 'smallworld.csv',
+                     'sap.csv', 'layered.csv', 'wetfloor.csv']
+    for loc in runtime_files:
+        if loc in os.listdir(folder_path):
+            print(f"Loading {loc}...", file=os.sys.stderr)
+            with open(os.path.join(folder_path, loc), 'r') as f:
+                f.readline()  # skip header
+                for line in f:
+                    parts = line.strip().split('\t')
+                    name = parts[0]
+                    times = [int(x.strip()) for x in parts[1:]]
+                    data[name] = {col: val for col, val in zip(solver_columns[1:], times)}
+                    data[name]['Name'] = name
+
+    # Load and merge feature data
+    infos_files = [
+        ('sapInfos.csv', 'sap', {'avgNumActions': 2, 'avgNumEffects': 3}),
+        ('layeredInfos.csv', 'layered', None),  # values from filename
+        ('wetfloorInfos.csv', 'wetfloor', {'avgNumActions': 4}),
+        ('synthInfos.csv', None, None)
     ]
-    for csv_files in csv_groups:
-        for loc in csv_files:
-            if loc in os.listdir(folder_path):
-                with open(os.path.join(folder_path, loc), 'r') as f:
-                    f.readline()
-                    for mdp in f:
-                        mdp_split = mdp.split('\t')
-                        name = mdp_split[0]
-                        times = [int(x.strip()) for x in mdp_split[1:]]
-                        data[name] = times
-                        data[name].append(times.index(min(times)))
-    extra_files = [
-        ('sapInfos.csv', True), ('layeredInfos.csv', True),
-        ('layeredInfo2.csv', True), ('wetfloorInfos.csv', True),
-        ('synthInfos.csv', False), ('otherSynth.csv', False)
-    ]
-    for fname, insert_type in extra_files:
+
+    for fname, default_model, fixed_values in infos_files:
         if fname in os.listdir(folder_path):
+            print(f"Loading {fname}...", file=os.sys.stderr)
             with open(os.path.join(folder_path, fname), 'r') as f:
                 for line in f:
-                    parts = line.strip().split(',')
+                    parts = line.strip().split('\t')
                     name = parts[0]
-                    dat = [safe_float(x) for x in parts[1:]]
-                    if insert_type:
-                        type_name = fname[:-9]
-                        dat.insert(0, type_name)
-                    if name in data:
-                        data[name] = dat + data[name]
-    data = {k: v for k, v in data.items() if len(v) >= 7}
-    return data, labels
+                    if name not in data:  # skip if no runtime data
+                        continue
+
+                    # Get base feature values
+                    if fname == 'synthInfos.csv':
+                        model = parts[1]
+                        features = [safe_float(x) for x in parts[2:]]
+                    else:
+                        model = default_model
+                        features = [safe_float(x) for x in parts[1:]]
+
+                    # Apply model-specific adjustments
+                    if fixed_values:
+                        for k, v in fixed_values.items():
+                            idx = feature_columns.index(k) - 1  # -1 for Model
+                            features[idx] = v
+                    elif default_model == 'layered':
+                        # Get avgNumActions and avgNumEffects from filename
+                        fn_fields = name.replace('.mdp', '').split('-')
+                        avg_actions = int(fn_fields[-2])
+                        max_effects = int(fn_fields[-1])
+                        avg_effects = (0 + max_effects) / 2
+                        features[-2] = avg_actions
+                        features[-1] = avg_effects
+                    elif default_model == 'wetfloor':
+                        # Divide avgNumEffects by avgNumActions
+                        features[-1] = features[-1] / 4.0
+
+                    # Store all features
+                    data[name]['Model'] = model
+                    for col, val in zip(feature_columns[1:], features):
+                        data[name][col] = val
+
+    # Convert dict of dicts to DataFrame-ready format
+    matrix_data = []
+    for name in data:
+        row = [data[name].get(col, 0) for col in all_columns]
+        matrix_data.append(row)
+
+    return matrix_data, all_columns
 
 
-def build_dataframe(data, labels):
-    all_data = list(data.values())
-    di = {k: list(v) for k, v in zip(labels, zip(*all_data))}
-    df = pd.DataFrame(di)
-    df['Goals Ratio'] = df['Goals Ratio'] / df['Nodes'] * 100
+def build_dataframe(matrix_data, headers):
+    # Data is already in matrix form, just convert to dataframe
+    df = pd.DataFrame(matrix_data, columns=headers)
+
+    # Ensure robust handling of columns
+    if 'Goals' in df.columns and 'Nodes' in df.columns:
+        df['Goals Ratio'] = df['Goals'] / df['Nodes'] * 100
+
+    # Convert Model column to numeric Category
     le = LabelEncoder()
-    mask = df['Category'].isin(CATEGORY_LIST)
+    mask = df['Model'].isin(CATEGORY_LIST)
     df = df[mask]
     le.fit(CATEGORY_LIST)
-    df['Category'] = le.transform(df['Category'])
-    for col in df:
-        df[col] = df[col].replace('', '0').astype(float)
+    df['Category'] = le.transform(df['Model'])
+
+    df = df.fillna(0)
+    # Convert numeric columns to float, leave string columns as is
+    for col in df.columns:
+        if col not in ['Name', 'Model']:  # Skip string columns
+            df[col] = df[col].replace(' ', '0').astype(float)
+    df.columns = df.columns.str.strip()
+    print('Dataframe columns:', list(df.columns))
+
+    # Compute 'Best Solver' from solver runtime columns
+    solver_names = ['VI', 'LRTDP', 'ILAOstar', 'TVI']
+    df['Best Solver'] = df[solver_names].idxmin(axis=1)
     return df
 
 
 def classification(df):
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import (precision_recall_fscore_support,
+                                 confusion_matrix)
+
+    solver_names = ['VI', 'LRTDP', 'ILAO*', 'TVI']
+
     class_names = CLASS_NAMES
     target = TARGET_LABEL
     full_set = class_names + [target]
     Z = df[full_set]
-    d = dice_ml.Data(
-        dataframe=Z,
-        continuous_features=['Clustering'],
-        outcome_name=target
-    )
-    mod = helpers.get_trained_model_for_dataset(
-        Z, backend="sklearn"
-    )
-    m = dice_ml.Model(model=mod, backend="sklearn")
-    exp = dice_ml.Dice(d, m, method="random")
-    X_train = Z[class_names]
-    cf_examples = exp.generate_counterfactuals(
-        X_train[:300],
-        total_CFs=10,
-        desired_class=1,
-        features_to_vary="all"
-    )
-    valid_cfs = [
-        x for x in cf_examples.cf_examples_list
-        if hasattr(x, 'final_cfs_df') and x.final_cfs_df is not None
-    ]
-    imp = exp.local_feature_importance(
-        X_train[:300], cf_examples_list=valid_cfs
-    )
-    struct = {x: 0 for x in class_names}
-    for elem in imp.local_importance:
-        for key in elem:
-            struct[key] += elem[key]
-    for key in struct:
-        struct[key] /= len(imp.local_importance)
-    return {
-        'df': df,
-        'cf': cf_examples,
-        'importance': imp.local_importance,
-        'summary': struct
+
+    X = Z[class_names]
+    y = Z[target]
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y,
+                                                        test_size=0.2,
+                                                        random_state=42)
+
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred,
+                                                               average=None)
+    accuracy = clf.score(X_test, y_test)
+
+    cm = confusion_matrix(y_test, y_pred)
+
+    # Feature importance
+    feature_importance = dict(zip(class_names, clf.feature_importances_))
+
+    # Format results to match paper tables
+    metrics = {
+        'accuracy': accuracy,
+        'precision': dict(zip(solver_names, precision)),
+        'recall': dict(zip(solver_names, recall)),
+        'f1': dict(zip(solver_names, f1)),
+        'feature_importance': feature_importance,
+        'confusion_matrix': cm.tolist()
     }
+
+    return metrics
 
 
 def main():
+    import numpy as np
+
     args = parse_arguments()
-    data, labels = load_data(args.input)
-    df = build_dataframe(data, labels)
+    data, headers = load_data(args.input)
+    df = build_dataframe(data, headers)
     results = classification(df)
+
     if args.print == 'debug':
         print('Num instances:', len(data))
+        print('\nDataset Statistics:')
         print(df.describe())
+
     elif args.print == 'df':
         print(df)
-    elif args.print == 'importance':
-        print(json.dumps(results['importance']))
-    elif args.print == 'cf':
-        print(
-            results['cf'].visualize_as_dataframe(
-                show_only_changes=True
-            )
-        )
-    elif args.print == 'summary':
-        print(json.dumps(results['summary'], indent=2))
+
+    else:  # Print all metrics by default
+        print('\nClassification Results:')
+        print(f"Global Accuracy: {results['accuracy'] * 100:.2f}%")
+
+        print('\nPer-Solver Metrics:')
+        solver_names = ['VI', 'LRTDP', 'ILAO*', 'TVI']
+        print(f"{'Solver':10} {'Precision':>10} {'Recall':>10} {'F1':>10}")
+        print('-' * 45)
+        for solver in solver_names:
+            print(f"{solver:10} {results['precision'][solver] * 100:>10.2f}% {results['recall'][solver] * 100:>10.2f}% {results['f1'][solver]:>10.3f}")
+
+        print('\nFeature Importance:')
+        sorted_features = sorted(results['feature_importance'].items(), key=lambda x: x[1], reverse=True)
+        for feature, importance in sorted_features:
+            print(f"{feature:20} {importance:.3f}")
+
+        print('\nConfusion Matrix:')
+        cm = np.array(results['confusion_matrix'])
+        print('True \\ Pred'.ljust(12) + ' '.join(f'{s:>8}' for s in solver_names))
+        print('-' * 50)
+        for i, solver in enumerate(solver_names):
+            print(f'{solver:<12}' + ' '.join(f'{n:>8}' for n in cm[i]))
 
 
 if __name__ == '__main__':

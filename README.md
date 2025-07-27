@@ -8,10 +8,12 @@ This repository contains all code to reproduce the results from our CANAI 2025 p
 - **mdptk/**: C++ code for solving MDPs with various algorithms
 
 ## Setup
-1. **Install dependencies:**
+1. **Initialize submodules:**
+   - After cloning, run: `git submodule update --init --recursive`
+2. **Install dependencies:**
    - Python: `pip install -r requirements.txt`
    - C++: `sudo apt install g++ libgoogle-glog-dev libgflags-dev perl pkg-config libboost-dev libcereal-dev`
-2. **Build solvers:**
+3. **Build solvers:**
    - `make -C graph-toolkit`
    - `make -C mdptk`
 
